@@ -2,6 +2,11 @@ import streamlit as st
 
 from services.job_analyzer import analyze_job_description
 from services.resume_parser import extract_resume_text
+from services.resume_rag import (
+    split_resume_text,
+    create_resume_vector_store,
+    search_resume
+)
 
 
 # ============================================================
@@ -51,27 +56,10 @@ st.markdown(
         line-height: 1.6;
     }
 
-    .card {
-        padding: 1.2rem;
-        border-radius: 16px;
-        border: 1px solid #374151;
-        background: rgba(31, 41, 55, 0.4);
-        margin-bottom: 1rem;
-    }
-
     .section-title {
         font-size: 21px;
         font-weight: 700;
         margin-bottom: 10px;
-    }
-
-    .skill-pill {
-        display: inline-block;
-        padding: 6px 12px;
-        margin: 4px;
-        border-radius: 20px;
-        border: 1px solid #4b5563;
-        font-size: 14px;
     }
 
     </style>
@@ -94,7 +82,7 @@ st.markdown(
 
         <div class="hero-subtitle">
             Analyze your resume against a job description
-            and understand what the role expects.
+            using RAG-powered resume search.
         </div>
 
     </div>
@@ -130,7 +118,7 @@ with resume_col:
         "Upload your resume",
         type=["pdf", "docx"],
         accept_multiple_files=False,
-        help="Upload a PDF or DOCX resume. Maximum size: 5 MB."
+        help="Maximum size: 5 MB."
     )
 
     if uploaded_resume:
@@ -157,11 +145,19 @@ with resume_col:
                         uploaded_resume
                     )
 
-                # Save extracted text in Streamlit session
-                st.session_state["resume_text"] = resume_text
-                st.session_state["resume_filename"] = (
-                    uploaded_resume.name
-                )
+                st.session_state[
+                    "resume_text"
+                ] = resume_text
+
+                st.session_state[
+                    "resume_filename"
+                ] = uploaded_resume.name
+
+                # Reset RAG status because a new extraction
+                # may represent a different resume.
+                st.session_state[
+                    "rag_ready"
+                ] = False
 
                 st.success(
                     "Resume text extracted successfully."
@@ -209,7 +205,7 @@ with job_col:
 
 
 # ============================================================
-# EXTRACTED RESUME TEXT
+# RESUME TEXT
 # ============================================================
 
 if "resume_text" in st.session_state:
@@ -221,40 +217,250 @@ if "resume_text" in st.session_state:
     )
 
     st.caption(
-        f"Source: {st.session_state.get('resume_filename', 'Resume')}"
+        f"Source: "
+        f"{st.session_state.get('resume_filename', 'Resume')}"
     )
 
-    resume_text = st.session_state["resume_text"]
+    resume_text = st.session_state[
+        "resume_text"
+    ]
 
     with st.expander(
-        "View full extracted text",
-        expanded=True
+        "View extracted text",
+        expanded=False
     ):
 
         st.text_area(
             "Extracted content",
             value=resume_text,
-            height=450,
+            height=400,
             label_visibility="collapsed"
         )
 
-    # Simple statistics
-    word_count = len(resume_text.split())
-    character_count = len(resume_text)
+    word_count = len(
+        resume_text.split()
+    )
+
+    character_count = len(
+        resume_text
+    )
 
     stat1, stat2 = st.columns(2)
 
     with stat1:
+
         st.metric(
             "Words",
             f"{word_count:,}"
         )
 
     with stat2:
+
         st.metric(
             "Characters",
             f"{character_count:,}"
         )
+
+
+# ============================================================
+# BUILD RESUME RAG
+# ============================================================
+
+if "resume_text" in st.session_state:
+
+    st.divider()
+
+    st.markdown(
+        "### 🧠 Resume RAG"
+    )
+
+    st.write(
+        "Convert the extracted resume text into searchable "
+        "chunks and store their embeddings in ChromaDB."
+    )
+
+    build_rag_button = st.button(
+        "⚡ Build Resume RAG",
+        use_container_width=True
+    )
+
+    if build_rag_button:
+
+        try:
+
+            with st.spinner(
+                "Splitting resume and creating embeddings..."
+            ):
+
+                chunks = split_resume_text(
+                    resume_text=st.session_state[
+                        "resume_text"
+                    ],
+                    filename=st.session_state.get(
+                        "resume_filename",
+                        "resume"
+                    )
+                )
+
+                create_resume_vector_store(
+                    chunks
+                )
+
+            st.session_state[
+                "rag_ready"
+            ] = True
+
+            st.session_state[
+                "chunk_count"
+            ] = len(chunks)
+
+            st.success(
+                "Resume RAG created successfully."
+            )
+
+            st.info(
+                f"Created {len(chunks)} resume chunks "
+                "and stored their embeddings in ChromaDB."
+            )
+
+        except ValueError as e:
+
+            st.error(str(e))
+
+        except Exception as e:
+
+            st.error(
+                f"Error while creating Resume RAG: {str(e)}"
+            )
+
+
+# ============================================================
+# SHOW CHUNK COUNT
+# ============================================================
+
+if st.session_state.get(
+    "rag_ready",
+    False
+):
+
+    chunk_count = st.session_state.get(
+        "chunk_count",
+        0
+    )
+
+    st.success(
+        f"🟢 Resume RAG is ready — "
+        f"{chunk_count} chunks stored."
+    )
+
+
+# ============================================================
+# TEST RESUME RETRIEVER
+# ============================================================
+# ============================================================
+# TEST RESUME RETRIEVER
+# ============================================================
+
+if st.session_state.get("rag_ready", False):
+
+    st.divider()
+
+    st.markdown("### 🔎 Test Resume Search")
+
+    st.write(
+        "Ask a question about the resume. "
+        "The retriever will return the most relevant chunks."
+    )
+
+    search_query = st.text_input(
+        "Resume search query",
+        placeholder=(
+            "Example: What experience does the candidate "
+            "have with Java?"
+        )
+    )
+
+    search_button = st.button(
+        "🔍 Search Resume",
+        use_container_width=True
+    )
+
+    if search_button:
+
+        if not search_query.strip():
+
+            st.warning(
+                "Please enter a search query."
+            )
+
+        else:
+
+            try:
+
+                with st.spinner(
+                    "Searching resume..."
+                ):
+
+                    results = search_resume(
+                        query=search_query,
+                        k=3
+                    )
+
+                if not results:
+
+                    st.warning(
+                        "No relevant resume chunks found."
+                    )
+
+                else:
+
+                    st.success(
+                        f"Found {len(results)} relevant chunks."
+                    )
+
+                    # results = [(Document, score), ...]
+                    for index, (document, score) in enumerate(
+                        results,
+                        start=1
+                    ):
+
+                        st.markdown(
+                            f"#### Result {index}"
+                        )
+
+                        source = document.metadata.get(
+                            "source",
+                            "Unknown"
+                        )
+
+                        chunk_id = document.metadata.get(
+                            "chunk_id",
+                            "Unknown"
+                        )
+
+                        st.caption(
+                            f"Source: {source} | "
+                            f"Chunk: {chunk_id} | "
+                            f"Distance: {score:.4f}"
+                        )
+
+                        st.write(
+                            document.page_content
+                        )
+
+                        st.divider()
+
+            except ValueError as e:
+
+                st.error(
+                    str(e)
+                )
+
+            except Exception as e:
+
+                st.error(
+                    f"Resume search failed: {str(e)}"
+                )
 
 
 # ============================================================
@@ -291,7 +497,9 @@ if analyze_button:
             # JOB TITLE
             # ------------------------------------------------
 
-            st.markdown("### 💼 Job Role")
+            st.markdown(
+                "### 💼 Job Role"
+            )
 
             st.markdown(
                 f"## {result.job_title}"
@@ -379,7 +587,9 @@ if analyze_button:
 
         except ValueError as e:
 
-            st.error(str(e))
+            st.error(
+                str(e)
+            )
 
         except Exception as e:
 
